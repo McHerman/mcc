@@ -1,0 +1,31 @@
+package build
+
+import mill._
+import mill.scalalib._
+
+object mcc extends SbtModule {
+  def scalaVersion = "2.13.18"
+  val chiselVersion = "7.7.0"
+
+  override def millSourcePath = super.millSourcePath / os.up
+
+  override def scalacOptions = Seq(
+    "-language:reflectiveCalls",
+    "-deprecation",
+    "-feature",
+    "-Xcheckinit",
+    "-Ymacro-annotations",
+  )
+  override def ivyDeps = Agg(
+    ivy"org.chipsalliance::chisel:$chiselVersion",
+  )
+  override def scalacPluginIvyDeps = Agg(
+    ivy"org.chipsalliance:::chisel-plugin:$chiselVersion",
+  )
+
+  object test extends SbtTests with TestModule.ScalaTest {
+    override def ivyDeps = Agg(
+      ivy"org.scalatest::scalatest::3.2.19"
+    )
+  }
+}
