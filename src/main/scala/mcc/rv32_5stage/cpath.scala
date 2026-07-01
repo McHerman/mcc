@@ -50,7 +50,8 @@ class CtlPath(implicit val conf: MccCoreParams) extends Module
   val io = IO(new Bundle {
     val dcpath = Flipped(new DebugCPath())
     val imem = new MemPortIo(conf.xprlen)
-    val dmem = new MemPortIo(conf.xprlen)
+    //val dmem = new MemPortIo(conf.xprlen)
+    val dmem = new TilelinkPort()
     val dat  = Flipped(new DatToCtlIo())
     val ctl  = new CtlToDatIo()
   })
@@ -227,7 +228,8 @@ class CtlPath(implicit val conf: MccCoreParams) extends Module
   
   // stall full pipeline on D$ miss
   val dmem_val   = io.dat.mem_ctrl_dmem_val
-  full_stall := !((dmem_val && io.dmem.resp.valid) || !dmem_val)
+  //full_stall := !((dmem_val && io.dmem.resp.valid) || !dmem_val)
+  full_stall := !((dmem_val && io.dmem.d.valid) || !dmem_val)
   
   
   io.ctl.dec_stall  := stall // stall if, dec stage (pipeline hazard)

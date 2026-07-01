@@ -15,7 +15,7 @@ class Core()(implicit val p: Parameters, val conf: MccCoreParams) extends Module
     val ddpath       = Flipped(new DebugDPath())
     val dcpath       = Flipped(new DebugCPath())
     val imem         = new MemPortIo(conf.xprlen)
-    val dmem         = new MemPortIo(conf.xprlen)
+    val dmem         = new TilelinkPort()
     val interrupt    = Input(new CoreInterrupts(false))
     val hartid       = Input(UInt())
     val reset_vector = Input(UInt())

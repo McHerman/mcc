@@ -108,63 +108,63 @@ class MccTestHarness(
   core.io.imem.resp.bits.data  := imem_word
 
   // ========================================================================
-  // Data memory port (dmem) — async read, combinational write
+  // Data memory port (dmem) — TileLink A/D, async scratchpad
   // ========================================================================
-  core.io.dmem.req.ready := true.B
+  core.io.dmem.a.ready := true.B
 
-  val dmem_req  = core.io.dmem.req.bits
-  val dmem_wen  = core.io.dmem.req.valid && dmem_req.fcn === M_XWR
-  val dmem_widx = wordIdx(dmem_req.addr)
+  val tl_a         = core.io.dmem.a.bits
+  val tl_req_valid = core.io.dmem.a.valid
+  val tl_is_put    = tl_a.opcode === TilelinkOpcodes.PutFullData ||
+                     tl_a.opcode === TilelinkOpcodes.PutPartialData
+  val dmem_widx    = wordIdx(tl_a.address)
 
-  // Byte offset within word
-  val dmem_offset = dmem_req.addr(1, 0)
-
-  // Byte mask from typ field (TL size: typ - 1 gives TL size, lower 2 bits)
-  val tlSize    = dmem_req.getTLSize
-  val byteMask  = MuxLookup(tlSize, "b1111".U(4.W))(Seq(
-    0.U -> ("b0001".U(4.W) << dmem_offset)(3, 0),
-    1.U -> ("b0011".U(4.W) << dmem_offset)(3, 0),
-    2.U -> "b1111".U(4.W),
+  // Write: mask and data are already byte-lane aligned (shifted by memory stage)
+  val wdata_bytes = VecInit(Seq(
+    tl_a.data( 7,  0),
+    tl_a.data(15,  8),
+    tl_a.data(23, 16),
+    tl_a.data(31, 24),
   ))
-
-  // Shifted write data
-  val wdata_shifted = VecInit(Seq(
-    (dmem_req.data >>  0)(7, 0),
-    (dmem_req.data >>  8)(7, 0),
-    (dmem_req.data >> 16)(7, 0),
-    (dmem_req.data >> 24)(7, 0),
-  ))
-
-  when(dmem_wen) {
-    mem.write(dmem_widx, wdata_shifted, byteMask.asBools)
+  when(tl_req_valid && tl_is_put) {
+    mem.write(dmem_widx, wdata_bytes, tl_a.mask.asBools)
   }
 
-  // Async read for load response
-  val dmem_rraw = mem.read(dmem_widx)
-  val dmem_word = Cat(dmem_rraw(3), dmem_rraw(2), dmem_rraw(1), dmem_rraw(0))
-
-  // Shift and sign-extend read data: shift right by byte offset, mask to size
-  val dmem_shifted = (dmem_word >> (dmem_offset << 3))(31, 0)
-  val dmem_signed  = dmem_req.getTLSigned
-  val dmem_rdata   = MuxLookup(dmem_req.getTLSize, dmem_shifted)(Seq(
-    0.U -> Cat(Fill(24, dmem_signed && dmem_shifted(7)),  dmem_shifted(7,  0)),
-    1.U -> Cat(Fill(16, dmem_signed && dmem_shifted(15)), dmem_shifted(15, 0)),
+  // Read: shift right by byte offset within word, then sign/zero-extend
+  // size[1:0] = TL access size (0=byte, 1=half, 2=word)
+  // size[2]   = 1 if signed, 0 if unsigned (custom encoding from memory stage)
+  val dmem_rraw    = mem.read(dmem_widx)
+  val dmem_word    = Cat(dmem_rraw(3), dmem_rraw(2), dmem_rraw(1), dmem_rraw(0))
+  val byte_off     = tl_a.address(1, 0)
+  val tl_size      = tl_a.size(1, 0)
+  val tl_signed    = tl_a.size(2)
+  val dmem_shifted = (dmem_word >> Cat(byte_off, 0.U(3.W)))(31, 0)
+  val dmem_rdata   = MuxLookup(tl_size, dmem_shifted)(Seq(
+    0.U -> Cat(Fill(24, tl_signed && dmem_shifted(7)),  dmem_shifted(7,  0)),
+    1.U -> Cat(Fill(16, tl_signed && dmem_shifted(15)), dmem_shifted(15, 0)),
   ))
 
-  core.io.dmem.resp.valid     := core.io.dmem.req.valid
-  core.io.dmem.resp.bits.data := dmem_rdata
+  // D channel response (combinational, same cycle as request)
+  core.io.dmem.d.valid        := tl_req_valid
+  core.io.dmem.d.bits.opcode  := Mux(tl_is_put, TilelinkOpcodes.AccessAck, TilelinkOpcodes.AccessAckData)
+  core.io.dmem.d.bits.param   := 0.U
+  core.io.dmem.d.bits.size    := tl_a.size
+  core.io.dmem.d.bits.source  := tl_a.source
+  core.io.dmem.d.bits.sink    := 0.U
+  core.io.dmem.d.bits.denied  := 0.U
+  core.io.dmem.d.bits.data    := dmem_rdata
+  core.io.dmem.d.bits.corrupt := 0.U
 
   // ========================================================================
   // tohost detection
   // ========================================================================
   val tohostWordIdx = ((tohostAddr - baseAddr) / 4).toInt
   val tohostReg = RegInit(0.U(32.W))
-  when(dmem_wen && dmem_widx === tohostWordIdx.U) {
+  when(tl_req_valid && tl_is_put && dmem_widx === tohostWordIdx.U) {
     tohostReg := Cat(
-      Mux(byteMask(3), wdata_shifted(3), 0.U),
-      Mux(byteMask(2), wdata_shifted(2), 0.U),
-      Mux(byteMask(1), wdata_shifted(1), 0.U),
-      Mux(byteMask(0), wdata_shifted(0), 0.U),
+      Mux(tl_a.mask(3), wdata_bytes(3), 0.U),
+      Mux(tl_a.mask(2), wdata_bytes(2), 0.U),
+      Mux(tl_a.mask(1), wdata_bytes(1), 0.U),
+      Mux(tl_a.mask(0), wdata_bytes(0), 0.U),
     )
   }
 

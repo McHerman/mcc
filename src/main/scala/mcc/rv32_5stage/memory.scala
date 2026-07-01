@@ -33,7 +33,8 @@ class MemCtlIn extends Bundle {
 class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module {
   val io = IO(new Bundle {
     val fromExe          = Flipped(new ExToMem)
-    val dmem             = new MemPortIo(conf.xprlen)
+    //val dmem             = new MemPortIo(conf.xprlen)
+    val dmem             = new TilelinkPort()
     val interrupt        = Input(new CoreInterrupts(false))
     val hartid           = Input(UInt())
     val ctl              = Input(new MemCtlIn)
@@ -102,7 +103,8 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   val mem_wbdata = MuxCase(io.fromExe.alu_out, Array(
     (io.fromExe.ctrl_wb_sel === WB_ALU) -> io.fromExe.alu_out,
     (io.fromExe.ctrl_wb_sel === WB_PC4) -> io.fromExe.alu_out,
-    (io.fromExe.ctrl_wb_sel === WB_MEM) -> io.dmem.resp.bits.data,
+    //(io.fromExe.ctrl_wb_sel === WB_MEM) -> io.dmem.resp.bits.data,
+    (io.fromExe.ctrl_wb_sel === WB_MEM) -> io.dmem.d.bits.data,
     (io.fromExe.ctrl_wb_sel === WB_CSR) -> csr.io.rw.rdata
   ))
 
@@ -111,12 +113,45 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   io.bypass_mem.wbaddr := io.fromExe.wbaddr
   io.bypass_mem.data   := mem_wbdata
 
-  // Data memory request
-  io.dmem.req.valid     := io.fromExe.ctrl_mem_val && !io.mem_data_misaligned
-  io.dmem.req.bits.addr := io.fromExe.alu_out
-  io.dmem.req.bits.fcn  := io.fromExe.ctrl_mem_fcn
-  io.dmem.req.bits.typ  := io.fromExe.ctrl_mem_typ
-  io.dmem.req.bits.data := io.fromExe.rs2_data
+  // Data memory request (TileLink A channel)
+  val mem_byte_off   = io.fromExe.alu_out(1, 0)
+  val mem_byte_shift = Cat(mem_byte_off, 0.U(3.W))  // byte_off * 8
+
+  io.dmem.a.valid := io.fromExe.ctrl_mem_val && !io.mem_data_misaligned
+
+  // opcode: PutFullData for stores, Get for loads
+  io.dmem.a.bits.opcode := Mux(io.fromExe.ctrl_mem_fcn === M_XWR,
+                               TilelinkOpcodes.PutFullData,
+                               TilelinkOpcodes.Get)
+
+  // param: reserved for Zaamo atomic operations
+  io.dmem.a.bits.param   := 0.U
+
+  // size[1:0] = TL access size (0=byte, 1=half, 2=word)
+  // size[2]   = 1 if signed load, 0 if unsigned (custom, for harness use)
+  io.dmem.a.bits.size    := Cat(~io.fromExe.ctrl_mem_typ(0), io.fromExe.ctrl_mem_typ(2, 1))
+
+  io.dmem.a.bits.source  := 0.U
+  io.dmem.a.bits.address := io.fromExe.alu_out
+
+  // mask: byte enables, shifted to the correct byte lanes for the access address
+  io.dmem.a.bits.mask := MuxLookup(io.fromExe.ctrl_mem_typ, "b1111".U(4.W))(Seq(
+    MSK_B  -> ("b0001".U(4.W) << mem_byte_off)(3, 0),
+    MSK_BU -> ("b0001".U(4.W) << mem_byte_off)(3, 0),
+    MSK_H  -> ("b0011".U(4.W) << mem_byte_off)(3, 0),
+    MSK_HU -> ("b0011".U(4.W) << mem_byte_off)(3, 0),
+    MSK_W  -> "b1111".U(4.W),
+    MSK_X  -> "b1111".U(4.W),
+  ))
+
+  // data: pre-shifted to the correct byte lanes for the access address
+  io.dmem.a.bits.data    := (io.fromExe.rs2_data << mem_byte_shift)(31, 0)
+  io.dmem.a.bits.corrupt := 0.U
+
+  // D channel: core always accepts responses immediately
+  io.dmem.d.ready := true.B
+
+
 
   // MEM → WB pipeline register write
   when (!io.ctl.full_stall) {
