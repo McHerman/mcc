@@ -72,7 +72,7 @@ class Decode(implicit val p: Parameters, val conf: MccCoreParams) extends Module
     val fromFetch  = Flipped(new FetchToDec)
     val toExe      = new DecToEx
     val ctl        = Input(new DecCtlIn)
-    val ddpath     = Flipped(new DebugDPath())
+    val rfRead     = new RegReadPort
     val bypass_exe = Input(new BypassPort)
     val bypass_mem = Input(new BypassPort)
     val wb_in      = Input(new WbPort)
@@ -89,18 +89,10 @@ class Decode(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   val dec_rs2_addr = io.fromFetch.inst(24, 20)
   val dec_wbaddr   = io.fromFetch.inst(11, 7)
 
-  val regfile = Module(new RegisterFile())
-  regfile.io.rs1_addr  := dec_rs1_addr
-  regfile.io.rs2_addr  := dec_rs2_addr
-  val rf_rs1_data       = regfile.io.rs1_data
-  val rf_rs2_data       = regfile.io.rs2_data
-  regfile.io.waddr     := io.wb_in.wbaddr
-  regfile.io.wdata     := io.wb_in.wbdata
-  regfile.io.wen       := io.wb_in.wen
-  regfile.io.dm_addr   := io.ddpath.addr
-  io.ddpath.rdata      := regfile.io.dm_rdata
-  regfile.io.dm_en     := io.ddpath.validreq
-  regfile.io.dm_wdata  := io.ddpath.wdata
+  io.rfRead.rs1_addr   := dec_rs1_addr
+  io.rfRead.rs2_addr   := dec_rs2_addr
+  val rf_rs1_data       = io.rfRead.rs1_data
+  val rf_rs2_data       = io.rfRead.rs2_data
 
   val imm_itype  = io.fromFetch.inst(31,20)
   val imm_stype  = Cat(io.fromFetch.inst(31,25), io.fromFetch.inst(11,7))

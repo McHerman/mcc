@@ -26,6 +26,7 @@ class Core()(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   val dec = Module(new Decode())
   val exe = Module(new Execute())
   val mem = Module(new Memory())
+  val wb  = Module(new Writeback())
 
   // Instruction memory: CtlPath first (DontCare req), Fetch last (wins)
   c.io.imem    <> io.imem
@@ -36,7 +37,7 @@ class Core()(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   io.dmem      <> mem.io.dmem
 
   // Debug paths
-  dec.io.ddpath <> io.ddpath
+  wb.io.ddpath  <> io.ddpath
   c.io.dcpath   <> io.dcpath
 
   // Reset / hart
@@ -58,8 +59,12 @@ class Core()(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   dec.io.bypass_exe <> exe.io.bypass
   dec.io.bypass_mem <> mem.io.bypass_mem
 
-  // Writeback: Memory WB register → Decode regfile write + WB bypass
+  // Writeback: Memory WB register → Writeback regfile write + Decode WB bypass
+  wb.io.wb_in  <> mem.io.wb_out
   dec.io.wb_in <> mem.io.wb_out
+
+  // Regfile read: Decode sends addresses, Writeback returns data
+  dec.io.rfRead <> wb.io.rfRead
 
   // Control path: Fetch uses the full CtlToDatIo bundle
   fet.io.ctl <> c.io.ctl
