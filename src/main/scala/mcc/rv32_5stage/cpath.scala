@@ -118,9 +118,29 @@ class CtlPath(implicit val conf: MccCoreParams) extends Module
                  WFI    -> List(Y, BR_N  , OP1_X  , OP2_X     , OEN_0, OEN_0, ALU_X   , WB_X  , REN_0, MEN_0, M_X  , MT_X, CSR.N, N), // implemented as a NOP
   
                  FENCE_I-> List(Y, BR_N  , OP1_X  , OP2_X     , OEN_0, OEN_0, ALU_X   , WB_X  , REN_0, MEN_0, M_X  , MT_X, CSR.N, Y),
-                 // kill pipeline and refetch instructions since the pipeline will be holding stall instructions.
-                 FENCE  -> List(Y, BR_N  , OP1_X  , OP2_X     , OEN_0, OEN_0, ALU_X   , WB_X  , REN_0, MEN_0, M_X  , MT_X, CSR.N, N)
                  // we are already sequentially consistent, so no need to honor the fence instruction
+                 FENCE  -> List(Y, BR_N  , OP1_X  , OP2_X     , OEN_0, OEN_0, ALU_X   , WB_X  , REN_0, MEN_0, M_X  , MT_X, CSR.N, N),
+
+                 // Zaamo: word AMOs — rs1=address, rs2=operand, rd=old value
+                 AMOADD  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 AMOSWAP -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 AMOXOR  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 AMOOR   -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 AMOAND  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 AMOMIN  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 AMOMAX  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 AMOMINU -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 AMOMAXU -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_W, CSR.N, N),
+                 // Zabha: halfword AMOs
+                 AMOADD_H  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N),
+                 AMOSWAP_H -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N),
+                 AMOXOR_H  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N),
+                 AMOOR_H   -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N),
+                 AMOAND_H  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N),
+                 AMOMIN_H  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N),
+                 AMOMAX_H  -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N),
+                 AMOMINU_H -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N),
+                 AMOMAXU_H -> List(Y, BR_N, OP1_RS1, OP2_RS2, OEN_1, OEN_1, ALU_ADD, WB_MEM, REN_1, MEN_1, M_XRD, MT_H, CSR.N, N)
                  ))
   
   // Put these control signals in variables

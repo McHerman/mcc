@@ -90,12 +90,16 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   io.csr_eret      := csr.io.eret
   csr.io.counters.foreach(_.inc := false.B)
 
+  // AMO uses rs1 directly as address; regular loads/stores use ALU output (rs1 + imm)
+  val is_amo   = io.fromExe.inst(6, 0) === "b0101111".U
+  val mem_addr = Mux(is_amo, io.fromExe.op1_data, io.fromExe.alu_out)
+
   // Data misalignment detection
   val misaligned_mask = Wire(UInt(3.W))
   misaligned_mask := ~(7.U(3.W) << (io.fromExe.ctrl_mem_typ - 1.U)(1, 0))
-  io.mem_data_misaligned := (misaligned_mask & io.fromExe.alu_out.apply(2, 0)).orR && io.fromExe.ctrl_mem_val
+  io.mem_data_misaligned := (misaligned_mask & mem_addr(2, 0)).orR && io.fromExe.ctrl_mem_val
   io.mem_store           := io.fromExe.ctrl_mem_fcn === M_XWR
-  mem_tval_data_ma       := io.fromExe.alu_out
+  mem_tval_data_ma       := mem_addr
 
   io.mem_ctrl_dmem_val := io.fromExe.ctrl_mem_val
 
@@ -103,7 +107,6 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   val mem_wbdata = MuxCase(io.fromExe.alu_out, Array(
     (io.fromExe.ctrl_wb_sel === WB_ALU) -> io.fromExe.alu_out,
     (io.fromExe.ctrl_wb_sel === WB_PC4) -> io.fromExe.alu_out,
-    //(io.fromExe.ctrl_wb_sel === WB_MEM) -> io.dmem.resp.bits.data,
     (io.fromExe.ctrl_wb_sel === WB_MEM) -> io.dmem.d.bits.data,
     (io.fromExe.ctrl_wb_sel === WB_CSR) -> csr.io.rw.rdata
   ))
@@ -114,27 +117,49 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   io.bypass_mem.data   := mem_wbdata
 
   // Data memory request (TileLink A channel)
-  val mem_byte_off   = io.fromExe.alu_out(1, 0)
+  val amo_funct5     = io.fromExe.inst(31, 27)
+  val mem_byte_off   = mem_addr(1, 0)
   val mem_byte_shift = Cat(mem_byte_off, 0.U(3.W))  // byte_off * 8
+
+  // funct5 → TileLink A opcode
+  val amo_opcode = MuxLookup(amo_funct5, TilelinkOpcodes.ArithmeticData)(Seq(
+    1.U  -> TilelinkOpcodes.LogicalData,  // AMOSWAP
+    4.U  -> TilelinkOpcodes.LogicalData,  // AMOXOR
+    8.U  -> TilelinkOpcodes.LogicalData,  // AMOOR
+    12.U -> TilelinkOpcodes.LogicalData,  // AMOAND
+  ))
+
+  // funct5 → TileLink A param
+  val amo_param = MuxLookup(amo_funct5, ArithmeticDataParam.ADD)(Seq(
+    0.U  -> ArithmeticDataParam.ADD,
+    1.U  -> LogicalDataParam.SWAP,
+    4.U  -> LogicalDataParam.XOR,
+    8.U  -> LogicalDataParam.OR,
+    12.U -> LogicalDataParam.AND,
+    16.U -> ArithmeticDataParam.MIN,
+    20.U -> ArithmeticDataParam.MAX,
+    24.U -> ArithmeticDataParam.MINU,
+    28.U -> ArithmeticDataParam.MAXU,
+  ))
 
   io.dmem.a.valid := io.fromExe.ctrl_mem_val && !io.mem_data_misaligned
 
-  // opcode: PutFullData for stores, Get for loads
-  io.dmem.a.bits.opcode := Mux(io.fromExe.ctrl_mem_fcn === M_XWR,
-                               TilelinkOpcodes.PutFullData,
-                               TilelinkOpcodes.Get)
+  io.dmem.a.bits.opcode := MuxCase(TilelinkOpcodes.Get, Seq(
+    (io.fromExe.ctrl_mem_fcn === M_XWR) -> TilelinkOpcodes.PutFullData,
+    is_amo                               -> amo_opcode,
+  ))
 
-  // param: reserved for Zaamo atomic operations
-  io.dmem.a.bits.param   := 0.U
+  io.dmem.a.bits.param := Mux(is_amo, amo_param, 0.U)
 
-  // size[1:0] = TL access size (0=byte, 1=half, 2=word)
-  // size[2]   = 1 if signed load, 0 if unsigned (custom, for harness use)
-  io.dmem.a.bits.size    := Cat(~io.fromExe.ctrl_mem_typ(0), io.fromExe.ctrl_mem_typ(2, 1))
+  // size: 0=byte, 1=half, 2=word; for loads also encodes sign (custom harness convention)
+  val is_amo_h = is_amo && (io.fromExe.ctrl_mem_typ === MT_H)
+  io.dmem.a.bits.size := Mux(is_amo, Mux(is_amo_h, 1.U, 2.U),
+                              Cat(~io.fromExe.ctrl_mem_typ(0), io.fromExe.ctrl_mem_typ(2, 1)))
 
   io.dmem.a.bits.source  := 0.U
-  io.dmem.a.bits.address := io.fromExe.alu_out
+  io.dmem.a.bits.address := mem_addr
 
-  // mask: byte enables, shifted to the correct byte lanes for the access address
+  // mask: byte enables shifted to the correct lanes
   io.dmem.a.bits.mask := MuxLookup(io.fromExe.ctrl_mem_typ, "b1111".U(4.W))(Seq(
     MSK_B  -> ("b0001".U(4.W) << mem_byte_off)(3, 0),
     MSK_BU -> ("b0001".U(4.W) << mem_byte_off)(3, 0),
@@ -144,7 +169,7 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module
     MSK_X  -> "b1111".U(4.W),
   ))
 
-  // data: pre-shifted to the correct byte lanes for the access address
+  // data: pre-shifted to the correct byte lanes
   io.dmem.a.bits.data    := (io.fromExe.rs2_data << mem_byte_shift)(31, 0)
   io.dmem.a.bits.corrupt := 0.U
 

@@ -1,6 +1,10 @@
 #ifndef TEST_H
 #define TEST_H
 
+typedef unsigned char      uint8_t;
+typedef unsigned short     uint16_t;
+typedef unsigned int       uint32_t;
+
 extern volatile int tohost;
 extern volatile int fromhost;
 

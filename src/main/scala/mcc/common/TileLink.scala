@@ -39,6 +39,13 @@ object ArithmeticDataParam {
   val ADDU    = 7.U(3.W)   // Add unsigned
 }
 
+object LogicalDataParam {
+  val XOR     = 0.U(3.W)
+  val OR      = 1.U(3.W)
+  val AND     = 2.U(3.W)
+  val SWAP    = 3.U(3.W)
+}
+
 class TilelinkA(implicit c: MemBusConfig = MemBusConfig()) extends Bundle {
   val opcode  = UInt(3.W)
   val param   = UInt(3.W)
