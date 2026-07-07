@@ -3,11 +3,40 @@ package build
 import mill._
 import mill.scalalib._
 
+// ATAN shared module (pure-Scala, no Chisel) — instruction layouts etc.
+object shared extends SbtModule {
+  def scalaVersion = "2.13.18"
+  override def millSourcePath = super.millSourcePath / os.up / os.up / "ATAN" / "shared"
+}
+
+// ATAN accelerator design — provides ATA8.MemTier and related infrastructure
+object atan extends SbtModule {
+  def scalaVersion = "2.13.18"
+  val chiselVersion = "7.7.0"
+  override def millSourcePath = super.millSourcePath / os.up / os.up / "ATAN"
+  override def moduleDeps = Seq(shared)
+  override def scalacOptions = Seq(
+    "-language:reflectiveCalls",
+    "-deprecation",
+    "-feature",
+    "-Xcheckinit",
+    "-Ymacro-annotations",
+  )
+  override def ivyDeps = Agg(
+    ivy"org.chipsalliance::chisel:$chiselVersion",
+  )
+  override def scalacPluginIvyDeps = Agg(
+    ivy"org.chipsalliance:::chisel-plugin:$chiselVersion",
+  )
+}
+
 object mcc extends SbtModule {
   def scalaVersion = "2.13.18"
   val chiselVersion = "7.7.0"
 
   override def millSourcePath = super.millSourcePath / os.up
+
+  override def moduleDeps = Seq(atan)
 
   override def scalacOptions = Seq(
     "-language:reflectiveCalls",

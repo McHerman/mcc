@@ -103,11 +103,23 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module
 
   io.mem_ctrl_dmem_val := io.fromExe.ctrl_mem_val
 
+  // Sub-word extraction for loads: MemTier returns a full 32-bit word, so shift
+  // and sign/zero-extend here based on ctrl_mem_typ and the byte offset within
+  // the word.  mem_addr is already available from line 95.
+  val load_d       = io.dmem.d.bits.data
+  val load_shifted = (load_d >> Cat(mem_addr(1, 0), 0.U(3.W)))(31, 0)
+  val load_data = MuxLookup(io.fromExe.ctrl_mem_typ, load_shifted)(Seq(
+    MT_B  -> Cat(Fill(24, load_shifted(7)),  load_shifted(7,  0)),
+    MT_BU -> Cat(0.U(24.W),                  load_shifted(7,  0)),
+    MT_H  -> Cat(Fill(16, load_shifted(15)), load_shifted(15, 0)),
+    MT_HU -> Cat(0.U(16.W),                  load_shifted(15, 0)),
+  ))
+
   // WB mux
   val mem_wbdata = MuxCase(io.fromExe.alu_out, Array(
     (io.fromExe.ctrl_wb_sel === WB_ALU) -> io.fromExe.alu_out,
     (io.fromExe.ctrl_wb_sel === WB_PC4) -> io.fromExe.alu_out,
-    (io.fromExe.ctrl_wb_sel === WB_MEM) -> io.dmem.d.bits.data,
+    (io.fromExe.ctrl_wb_sel === WB_MEM) -> load_data,
     (io.fromExe.ctrl_wb_sel === WB_CSR) -> csr.io.rw.rdata
   ))
 
