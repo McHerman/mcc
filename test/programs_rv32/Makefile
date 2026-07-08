@@ -9,7 +9,7 @@ CRT0     = crt0.S
 
 ASM_TESTS    = test_add
 C_TESTS      = test_c_example
-ATOMIC_TESTS = test_zaamo
+ATOMIC_TESTS = test_zaamo test_sem
 
 TESTS = $(ASM_TESTS) $(C_TESTS) $(ATOMIC_TESTS)
 
