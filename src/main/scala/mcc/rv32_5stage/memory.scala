@@ -30,11 +30,11 @@ class MemCtlIn extends Bundle {
   val mem_exception_cause  = UInt(32.W)
 }
 
-class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module {
+class Memory(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.MemBusConfig) extends Module {
   val io = IO(new Bundle {
     val fromExe          = Flipped(new ExToMem)
     //val dmem             = new MemPortIo(conf.xprlen)
-    val dmem             = new TilelinkPort()
+    val dmem             = new ATA8.TilelinkPort()
     val interrupt        = Input(new CoreInterrupts(false))
     val hartid           = Input(UInt())
     val ctl              = Input(new MemCtlIn)
@@ -134,39 +134,38 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams) extends Module
   val mem_byte_shift = Cat(mem_byte_off, 0.U(3.W))  // byte_off * 8
 
   // funct5 → TileLink A opcode
-  val amo_opcode = MuxLookup(amo_funct5, TilelinkOpcodes.ArithmeticData)(Seq(
-    1.U  -> TilelinkOpcodes.LogicalData,  // AMOSWAP
-    4.U  -> TilelinkOpcodes.LogicalData,  // AMOXOR
-    8.U  -> TilelinkOpcodes.LogicalData,  // AMOOR
-    12.U -> TilelinkOpcodes.LogicalData,  // AMOAND
+  val amo_opcode = MuxLookup(amo_funct5, ATA8.TilelinkOpcodes.ArithmeticData)(Seq(
+    1.U  -> ATA8.TilelinkOpcodes.LogicalData,  // AMOSWAP
+    4.U  -> ATA8.TilelinkOpcodes.LogicalData,  // AMOXOR
+    8.U  -> ATA8.TilelinkOpcodes.LogicalData,  // AMOOR
+    12.U -> ATA8.TilelinkOpcodes.LogicalData,  // AMOAND
   ))
 
   // funct5 → TileLink A param
-  val amo_param = MuxLookup(amo_funct5, ArithmeticDataParam.ADD)(Seq(
-    0.U  -> ArithmeticDataParam.ADD,
-    1.U  -> LogicalDataParam.SWAP,
-    4.U  -> LogicalDataParam.XOR,
-    8.U  -> LogicalDataParam.OR,
-    12.U -> LogicalDataParam.AND,
-    16.U -> ArithmeticDataParam.MIN,
-    20.U -> ArithmeticDataParam.MAX,
-    24.U -> ArithmeticDataParam.MINU,
-    28.U -> ArithmeticDataParam.MAXU,
+  val amo_param = MuxLookup(amo_funct5, ATA8.ArithmeticDataParam.ADD)(Seq(
+    0.U  -> ATA8.ArithmeticDataParam.ADD,
+    1.U  -> ATA8.LogicalDataParam.SWAP,
+    4.U  -> ATA8.LogicalDataParam.XOR,
+    8.U  -> ATA8.LogicalDataParam.OR,
+    12.U -> ATA8.LogicalDataParam.AND,
+    16.U -> ATA8.ArithmeticDataParam.MIN,
+    20.U -> ATA8.ArithmeticDataParam.MAX,
+    24.U -> ATA8.ArithmeticDataParam.MINU,
+    28.U -> ATA8.ArithmeticDataParam.MAXU,
   ))
 
   io.dmem.a.valid := io.fromExe.ctrl_mem_val && !io.mem_data_misaligned
 
-  io.dmem.a.bits.opcode := MuxCase(TilelinkOpcodes.Get, Seq(
-    (io.fromExe.ctrl_mem_fcn === M_XWR) -> TilelinkOpcodes.PutFullData,
+  io.dmem.a.bits.opcode := MuxCase(ATA8.TilelinkOpcodes.Get, Seq(
+    (io.fromExe.ctrl_mem_fcn === M_XWR) -> ATA8.TilelinkOpcodes.PutFullData,
     is_amo                               -> amo_opcode,
   ))
 
   io.dmem.a.bits.param := Mux(is_amo, amo_param, 0.U)
 
-  // size: 0=byte, 1=half, 2=word; for loads also encodes sign (custom harness convention)
-  val is_amo_h = is_amo && (io.fromExe.ctrl_mem_typ === MT_H)
-  io.dmem.a.bits.size := Mux(is_amo, Mux(is_amo_h, 1.U, 2.U),
-                              Cat(~io.fromExe.ctrl_mem_typ(0), io.fromExe.ctrl_mem_typ(2, 1)))
+  // mcc never bursts: every request is exactly one bus beat. Byte/half/word
+  // width and load sign-extension are carried entirely by `mask`, below.
+  io.dmem.a.bits.size := bus.dataBusSize.U
 
   io.dmem.a.bits.source  := 0.U
   io.dmem.a.bits.address := mem_addr

@@ -124,12 +124,12 @@ class CtlToDatIo extends Bundle()
   val mem_exception_cause  = Output(UInt(32.W))
 }
 
-class CtlPath(implicit val conf: MccCoreParams) extends Module
+class CtlPath(implicit val conf: MccCoreParams, val bus: ATA8.MemBusConfig) extends Module
 {
   val io = IO(new Bundle {
     val dcpath = Flipped(new DebugCPath())
     val imem = new MemPortIo(conf.xprlen)
-    val dmem = new TilelinkPort()
+    val dmem = new ATA8.TilelinkPort()
     val dat  = Flipped(new DatToCtlIo())
     val ctl  = new CtlToDatIo()
   })

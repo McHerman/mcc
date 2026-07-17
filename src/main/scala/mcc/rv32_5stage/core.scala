@@ -10,12 +10,12 @@ import mcc.common._
 import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.rocket.CoreInterrupts
 
-class Core()(implicit val p: Parameters, val conf: MccCoreParams) extends Module {
+class Core()(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.MemBusConfig) extends Module {
   val io = IO(new Bundle {
     val ddpath       = Flipped(new DebugDPath())
     val dcpath       = Flipped(new DebugCPath())
     val imem         = new MemPortIo(conf.xprlen)
-    val dmem         = new TilelinkPort()
+    val dmem         = new ATA8.TilelinkPort()
     val interrupt    = Input(new CoreInterrupts(false))
     val hartid       = Input(UInt())
     val reset_vector = Input(UInt())

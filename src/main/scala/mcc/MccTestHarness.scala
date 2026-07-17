@@ -57,7 +57,13 @@ class MccTestHarness(
     val cycles  = Output(UInt(64.W))
   })
 
-  val core = Module(new mcc.stage5.Core())
+  // Bus geometry for mcc's own dmem port: 32-bit CPU address space, 4-byte
+  // (one-word) beats, single in-flight transaction. Plain val (not implicit)
+  // to avoid shadowing `mc` as the ambient ATA8.MemBusConfig implicit.
+  val coreBusConf: ATA8.MemBusConfig =
+    ATA8.Configuration(bus = ATA8.BusParams(dataBusSize = 4, addrWidth = 32, sourceWidth = 1))
+
+  val core = Module(new mcc.stage5.Core()(p, conf, coreBusConf))
 
   val cycleCount = RegInit(0.U(64.W))
   cycleCount := cycleCount + 1.U
@@ -129,32 +135,18 @@ class MccTestHarness(
     )
   )))
 
-  // ── A channel: mcc → TLXbar ──────────────────────────────────────────────
-  val mccA      = core.io.dmem.a
-  val mccOffset = (mccA.bits.address - baseAddr.U)(15, 0)
+  // ── mcc dmem ↔ TLXbar ────────────────────────────────────────────────────
+  // core.io.dmem and hostDemux.io.in(0) are both ATA8.TilelinkPort now, so a
+  // plain <> handles every field except the ones that genuinely differ:
+  // address (mcc's 32-bit CPU address needs rebasing into ATAN's 16-bit local
+  // window) and gating the A channel on ROM-load completion.
+  val mccA = core.io.dmem.a
 
+  core.io.dmem <> hostDemux.io.in(0)
+
+  hostDemux.io.in(0).a.bits.address := (mccA.bits.address - baseAddr.U)(15, 0)
   hostDemux.io.in(0).a.valid        := mccA.valid && initDone
-  hostDemux.io.in(0).a.bits.opcode  := mccA.bits.opcode
-  hostDemux.io.in(0).a.bits.param   := mccA.bits.param
-  hostDemux.io.in(0).a.bits.size    := mc.dataBusSize.U
-  hostDemux.io.in(0).a.bits.source  := mccA.bits.source
-  hostDemux.io.in(0).a.bits.address := mccOffset
-  hostDemux.io.in(0).a.bits.mask    := mccA.bits.mask
-  hostDemux.io.in(0).a.bits.data    := mccA.bits.data
-  hostDemux.io.in(0).a.bits.corrupt := 0.U
-  mccA.ready := hostDemux.io.in(0).a.ready && initDone
-
-  // ── D channel: TLXbar → mcc ──────────────────────────────────────────────
-  core.io.dmem.d.valid        := hostDemux.io.in(0).d.valid
-  core.io.dmem.d.bits.opcode  := hostDemux.io.in(0).d.bits.opcode
-  core.io.dmem.d.bits.param   := hostDemux.io.in(0).d.bits.param
-  core.io.dmem.d.bits.size    := hostDemux.io.in(0).d.bits.size
-  core.io.dmem.d.bits.source  := hostDemux.io.in(0).d.bits.source
-  core.io.dmem.d.bits.sink    := 0.U
-  core.io.dmem.d.bits.denied  := 0.U
-  core.io.dmem.d.bits.data    := hostDemux.io.in(0).d.bits.data
-  core.io.dmem.d.bits.corrupt := 0.U
-  hostDemux.io.in(0).d.ready  := core.io.dmem.d.ready
+  mccA.ready                        := hostDemux.io.in(0).a.ready && initDone
 
   // ── TLXbar out(0) → MemTier ──────────────────────────────────────────────
   hostDemux.io.out(0) <> memTier.io.hostIn
@@ -202,8 +194,8 @@ class MccTestHarness(
   // ── tohost detection ──────────────────────────────────────────────────────
   val tohostOff = (tohostAddr - baseAddr).toInt
   val isTohostWrite = mccA.fire &&
-    (mccA.bits.opcode === mcc.common.TilelinkOpcodes.PutFullData ||
-     mccA.bits.opcode === mcc.common.TilelinkOpcodes.PutPartialData) &&
+    (mccA.bits.opcode === ATA8.TilelinkOpcodes.PutFullData ||
+     mccA.bits.opcode === ATA8.TilelinkOpcodes.PutPartialData) &&
     (mccA.bits.address - baseAddr.U) === tohostOff.U
 
   val tohostReg = RegInit(0.U(32.W))
