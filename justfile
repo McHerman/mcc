@@ -12,6 +12,10 @@ test-trace name: build-programs-rv32
     MCC_TEST_HEX={{justfile_directory()}}/test/programs_rv32/{{name}}.memhex mill mcc.test.testOnly mcc.MccProgramTest -- -DemitVcd=1
 
 
+test-llvm:
+    mill mcc.test.testOnly mcc.MccLLVMTest -- -DemitVcd=1
+  
+
 test-all: build-programs-rv32
     #!/usr/bin/env bash
     failed=0

@@ -34,7 +34,7 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.
   val io = IO(new Bundle {
     val fromExe          = Flipped(new ExToMem)
     //val dmem             = new MemPortIo(conf.xprlen)
-    val dmem             = new ATA8.TilelinkPort()
+    val dmem             = new ATA8.TilelinkPort(bus.tlBus)
     val interrupt        = Input(new CoreInterrupts(false))
     val hartid           = Input(UInt())
     val ctl              = Input(new MemCtlIn)

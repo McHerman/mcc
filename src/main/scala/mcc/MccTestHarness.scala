@@ -35,35 +35,36 @@ class MccTestHarness(
 
   implicit val conf: MccCoreParams = MccCoreParams(xprlen = 32)
 
-  // ATAN MemTier config: 4-byte bus, 1 tier with atomic support on hostIn.
-  // nBanks=2 required by MemTierScratchpad (log2Ceil needs at least 1 bit).
   val memWords = memBytes / 4
-  implicit val mc: ATA8.MemSystemConfig = ATA8.MemSystemConfig(
-    tiers         = Seq(ATA8.TierConfig(
-                      nWritePorts = 0,
-                      nReadPorts  = 0,
-                      nBanks      = 2,
-                      bankDepth   = memWords / 2,
-                      atomic      = true)),
-    dataBusSize   = 4,
-    arithDataWidth = 8,
-    addrWidth     = 16,
-    sourceWidth   = 4,   // TLXbar allocates 10 IDs/master → rounded to 16 → needs log2Ceil(16)=4 bits
-  )
-
-  val io = IO(new Bundle {
-    val success = Output(Bool())
-    val tohost  = Output(UInt(32.W))
-    val cycles  = Output(UInt(64.W))
-  })
 
   // Bus geometry for mcc's own dmem port: 32-bit CPU address space, 4-byte
   // (one-word) beats, single in-flight transaction. Plain val (not implicit)
-  // to avoid shadowing `mc` as the ambient ATA8.MemBusConfig implicit.
+  // to avoid ambiguity with atanBusConf below as the ATA8.MemBusConfig implicit.
   val coreBusConf: ATA8.MemBusConfig =
     ATA8.Configuration(bus = ATA8.BusParams(dataBusSize = 4, addrWidth = 32, sourceWidth = 1))
 
+  val io = IO(new Bundle {
+    val success    = Output(Bool())
+    val tohost     = Output(UInt(32.W))
+    val cycles     = Output(UInt(64.W))
+    // Test-only mirror of the core's dmem TileLink bus: chisel3.simulator's
+    // peek/poke only sees the top-level DUT's own IO, so internal submodule
+    // signals like core.io.dmem aren't peekable directly from a test.
+    val dmemMirror = Output(new ATA8.TilelinkPort(coreBusConf.tlBus))
+  })
+
   val core = Module(new mcc.stage5.Core()(p, conf, coreBusConf))
+
+  // Field-by-field (not a bundle-level :=): io.dmemMirror is Output-wrapped,
+  // so its `a`/`d` sub-bundles lose the Decoupled/Flipped-ness that
+  // core.io.dmem.a/d have, and a bulk connect between differently-flipped
+  // bundle types is rejected by firtool.
+  io.dmemMirror.a.valid := core.io.dmem.a.valid
+  io.dmemMirror.a.ready := core.io.dmem.a.ready
+  io.dmemMirror.a.bits  := core.io.dmem.a.bits
+  io.dmemMirror.d.valid := core.io.dmem.d.valid
+  io.dmemMirror.d.ready := core.io.dmem.d.ready
+  io.dmemMirror.d.bits  := core.io.dmem.d.bits
 
   val cycleCount = RegInit(0.U(64.W))
   cycleCount := cycleCount + 1.U
@@ -76,8 +77,8 @@ class MccTestHarness(
   core.io.reset_vector := baseAddr.U
 
   // ── Instruction memory: async Mem + ROM init ──────────────────────────────
-  // MemTier uses SyncReadMem so can't serve same-cycle instruction fetches;
-  // keep a separate async Mem for imem.
+  // The data-memory path below uses SyncReadMem, which can't serve
+  // same-cycle instruction fetches; keep a separate async Mem for imem.
   val addrBits = log2Ceil(memBytes)
   def wordIdx(addr: UInt): UInt = addr(addrBits - 1, 2)
 
@@ -108,31 +109,52 @@ class MccTestHarness(
   core.io.imem.resp.valid     := initDone && core.io.imem.req.valid
   core.io.imem.resp.bits.data := Cat(imem_rdata(3), imem_rdata(2), imem_rdata(1), imem_rdata(0))
 
-  // ── Data memory + Semaphore System ───────────────────────────────────────
-  val memTier = Module(new ATA8.MemTier(mc.tiers.head, nRwPorts = 0))
+  // ── Data memory ───────────────────────────────────────────────────────────
+  implicit val _coreBusConf: ATA8.MemBusConfig = coreBusConf
 
-  // ATA8.Configuration for SemSystem — same bus geometry as mc.
-  // Plain val (not implicit) to avoid shadowing mc as the MemBusConfig implicit.
-  val semConf = ATA8.Configuration(
+  val dataHandler = Module(new ATA8.TLScratchpadHandler(
+    ATA8.TLScratchConfig(read = true, write = true, atomic = true, tlConfig = coreBusConf.tlBus)
+  ))
+
+  val spmConfig = ATA8.SPMConfig(bankDepth = memBytes / coreBusConf.dataBusSize,
+                            writeports = 1,
+                            readports = 1)
+
+  val dataMem = Module(new ATA8.MemTierScratchpad(spmConfig)(coreBusConf))
+
+  dataHandler.io.wMem.get <> dataMem.io.Writeport(0)
+  dataHandler.io.rMem.get <> dataMem.io.Readport(0)
+
+  // Single dedicated client: no shared-reservation system needed.
+  dataHandler.io.amoReserve.get.ready   := true.B
+  dataHandler.io.reserveIn.get(0).valid := false.B
+  dataHandler.io.reserveIn.get(0).bits  := DontCare
+
+  // ── Semaphore System ──────────────────────────────────────────────────────
+  // ATAN-side (16-bit local address) bus geometry shared by TLXbar and
+  // SemSystem. Plain val (not implicit) to avoid shadowing coreBusConf as
+  // the ambient ATA8.MemBusConfig implicit.
+  val atanBusConf = ATA8.Configuration(
     bus       = ATA8.BusParams(dataBusSize = 4, addrWidth = 16, sourceWidth = 4),
     semaphore = ATA8.SemaphoreParams(nSemaphores = 1, queueSize = 2, generationWidth = 0),
   )
 
   // Semaphore 0 mapped at harness offset 0x4000 (mcc address = baseAddr + 0x4000).
-  // MemTier occupies offsets 0x0000 – 0x3FFF; SemSystem starts at 0x4000.
+  // Data memory occupies offsets 0x0000 – (memBytes-1); SemSystem starts at 0x4000.
   //   word 0 (byte offset 0x4000): full register
   //   word 1 (byte offset 0x4004): empty register
-  val SemSys = Module(new ATA8.SemSystem(1)(semConf))
+  val SemSys = Module(new ATA8.SemSystem(1)(atanBusConf))
 
-  // TLXbar routes mcc dmem to MemTier (slave 0) or SemSystem (slave 1) by address.
-  //   slave 0: (base=0,      mask=0x3FFF) → offsets 0x0000 – 0x3FFF
-  //   slave 1: (base=0x4000, mask=0x00FF) → offsets 0x4000 – 0x40FF
+  // TLXbar routes mcc dmem to the data memory (slave 0) or SemSystem (slave 1) by address.
+  //   slave 0: (base=0,      mask=memBytes-1) → offsets 0x0000 – (memBytes-1)
+  //   slave 1: (base=0x4000, mask=0x00FF)     → offsets 0x4000 – 0x40FF
   val hostDemux = Module(new ATA8.TLXbar(ATA8.TLXbarConfig(
     nMasters = 1,
     slaves   = Seq(
-      ATA8.TLSlaveConfig(addressSet = Seq((mc.tierBases(0), mc.tierSizes(0) - 1))),
+      ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0), BigInt(memBytes - 1)))),
       ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0x4000),  BigInt(0x00FF)))),
-    )
+    ),
+    tl       = atanBusConf.tlBus,
   )))
 
   // ── mcc dmem ↔ TLXbar ────────────────────────────────────────────────────
@@ -148,8 +170,8 @@ class MccTestHarness(
   hostDemux.io.in(0).a.valid        := mccA.valid && initDone
   mccA.ready                        := hostDemux.io.in(0).a.ready && initDone
 
-  // ── TLXbar out(0) → MemTier ──────────────────────────────────────────────
-  hostDemux.io.out(0) <> memTier.io.hostIn
+  // ── TLXbar out(0) → data memory ───────────────────────────────────────────
+  hostDemux.io.out(0) <> dataHandler.io.tl
 
   // ── TLXbar out(1) → SemSystem ────────────────────────────────────────────
   // Address transform: strip semBase then convert byte → word index.
