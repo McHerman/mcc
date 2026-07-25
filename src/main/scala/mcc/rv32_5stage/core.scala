@@ -14,7 +14,7 @@ class Core()(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.
   val io = IO(new Bundle {
     val ddpath       = Flipped(new DebugDPath())
     val dcpath       = Flipped(new DebugCPath())
-    val imem         = new MemPortIo(conf.xprlen)
+    val imem         = new ATA8.TilelinkPort(bus.tlBus)
     val dmem         = new ATA8.TilelinkPort(bus.tlBus)
     val interrupt    = Input(new CoreInterrupts(false))
     val hartid       = Input(UInt())

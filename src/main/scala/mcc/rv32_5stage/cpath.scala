@@ -128,7 +128,7 @@ class CtlPath(implicit val conf: MccCoreParams, val bus: ATA8.MemBusConfig) exte
 {
   val io = IO(new Bundle {
     val dcpath = Flipped(new DebugCPath())
-    val imem = new MemPortIo(conf.xprlen)
+    val imem = new ATA8.TilelinkPort(bus.tlBus)
     val dmem = new ATA8.TilelinkPort(bus.tlBus)
     val dat  = Flipped(new DatToCtlIo())
     val ctl  = new CtlToDatIo()

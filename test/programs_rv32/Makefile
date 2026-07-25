@@ -1,6 +1,5 @@
 CC      = clang
 OBJCOPY = llvm-objcopy
-
 CFLAGS        = --target=riscv32 -march=rv32im -mabi=ilp32 -mcmodel=medany -nostdlib -nostartfiles -fuse-ld=lld
 CFLAGS_ATOMIC = --target=riscv32 -march=rv32ia_zabha -mabi=ilp32 -mcmodel=medany -nostdlib -nostartfiles -fuse-ld=lld
 LDSCRIPT = link.ld
@@ -9,9 +8,10 @@ CRT0     = crt0.S
 
 ASM_TESTS    = test_add
 C_TESTS      = test_c_example
-ATOMIC_TESTS = test_zaamo test_sem
+ATOMIC_TESTS = test_zaamo test_sem sem_kernel
+IR_TESTS = penis out
 
-TESTS = $(ASM_TESTS) $(C_TESTS) $(ATOMIC_TESTS)
+TESTS = $(ASM_TESTS) $(C_TESTS) $(ATOMIC_TESTS) $(IR_TESTS)
 
 all: $(addsuffix .memhex, $(TESTS))
 
@@ -23,6 +23,9 @@ $(addsuffix .elf, $(C_TESTS)): %.elf: %.c $(CRT0) $(LDSCRIPT) test.h
 
 $(addsuffix .elf, $(ATOMIC_TESTS)): %.elf: %.c $(CRT0) $(LDSCRIPT) test.h
 	$(CC) $(CFLAGS_ATOMIC) -T $(LDSCRIPT) -o $@ $(CRT0) $<
+
+$(addsuffix .elf, $(IR_TESTS)): %.elf: %.ll $(CRT0) $(LDSCRIPT) test.h
+	$(CC) $(CFLAGS_ATOMIC) -T $(LDSCRIPT) -o $@ $(CRT0) -x ir  $<
 
 %.memhex: %.elf
 	$(OBJCOPY) -O binary $< $@.bin

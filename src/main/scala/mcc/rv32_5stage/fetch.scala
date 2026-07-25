@@ -25,13 +25,24 @@ class FetchToDec(implicit val conf: MccCoreParams) extends Bundle()
   //val valid         = Bool(false.B)
   val valid         = Bool()
   //val inst          = RegInit(BUBBLE)
-  val inst          = UInt(32.W) 
+  val inst          = UInt(32.W)
   val pc            = UInt(conf.xprlen.W)
 }
 
-class Fetch(implicit val p: Parameters, val conf: MccCoreParams) extends Module {
+// One in-flight fetch, indexed by the TileLink source id (0 or 1) it was
+// issued with: occupied from the cycle its Get fires until decode consumes
+// it, holding whatever the eventual response resolves to.
+class FetchSlot(implicit val conf: MccCoreParams) extends Bundle {
+  val valid    = Bool()  // issued, not yet consumed by decode
+  val resolved = Bool()  // the D-channel response for this slot has arrived
+  val killed   = Bool()  // discard as a bubble once resolved (redirect/fencei happened while in flight)
+  val pc       = UInt(conf.xprlen.W)
+  val data     = UInt(32.W)
+}
+
+class Fetch(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.MemBusConfig) extends Module {
   val io = IO(new Bundle {
-    val imem                = new MemPortIo(conf.xprlen)
+    val imem                = new ATA8.TilelinkPort(bus.tlBus)
     val ctl                 = Flipped(new CtlToDatIo())
     val reset_vector        = Input(UInt())
     val toDec               = new FetchToDec
@@ -48,65 +59,80 @@ class Fetch(implicit val p: Parameters, val conf: MccCoreParams) extends Module 
   val decReg    = Reg(new FetchToDec)
 
   io.toDec := decReg
+  
+  // slots store information about issued instruction fetches. Altenates ID's
+  val slots   = RegInit(VecInit(Seq.fill(2)(0.U.asTypeOf(new FetchSlot))))
+  val issueId = RegInit(0.U(1.W))
+  val headId  = RegInit(0.U(1.W))
 
-  //**********************************
-  // Instruction Fetch Stage
   val if_pc_next = Wire(UInt(32.W))
-  
-  // Instruction fetch buffer
-  val if_buffer_in = Wire(new DecoupledIO(new MemResp(conf.xprlen)))
-  if_buffer_in.bits := io.imem.resp.bits
-  if_buffer_in.valid := io.imem.resp.valid
-  assert(!(if_buffer_in.valid && !if_buffer_in.ready), "Instruction backlog")
-  
-  val if_buffer_out = Queue(if_buffer_in, entries = 1, pipe = false, flow = true)
-  if_buffer_out.ready := !io.ctl.dec_stall && !io.ctl.full_stall
-  
-  // Instruction PC buffer
-  val if_pc_buffer_in = Wire(new DecoupledIO(UInt(conf.xprlen.W)))
-  if_pc_buffer_in.bits := if_reg_pc
-  if_pc_buffer_in.valid := if_buffer_in.valid
-  
-  val if_pc_buffer_out = Queue(if_pc_buffer_in, entries = 1, pipe = false, flow = true)
-  if_pc_buffer_out.ready := if_buffer_out.ready
-  
-  // Instruction fetch kill flag buffer
-  val if_reg_killed = RegInit(false.B)
-  when ((io.ctl.pipeline_kill || io.ctl.if_kill) && !if_buffer_out.fire)
-  {
-     if_reg_killed := true.B
-  }
-  when (if_reg_killed && if_buffer_out.fire)
-  {
-     if_reg_killed := false.B
-  }
-  
-  // Do not change the PC again if the instruction is killed in previous cycles (when the PC has changed)
-  when ((if_buffer_in.fire && !if_reg_killed) || io.ctl.if_kill || io.ctl.pipeline_kill)
-  {
-     if_reg_pc := if_pc_next
-  }
-  
-  val if_pc_plus4 = (if_reg_pc + 4.asUInt(conf.xprlen.W))
-  
-  if_pc_next := Mux(io.ctl.exe_pc_sel === PC_4,      if_pc_plus4,
+
+  if_pc_next := Mux(io.ctl.exe_pc_sel === PC_4,      if_reg_pc + 4.asUInt(conf.xprlen.W),
                 Mux(io.ctl.exe_pc_sel === PC_BRJMP,  io.exe_brjmp_target,
                 Mux(io.ctl.exe_pc_sel === PC_JALR,   io.exe_jump_reg_target,
                 /*Mux(io.ctl.exe_pc_sel === PC_EXC*/ io.exception_target)))
-  
+
   // for a fencei, refetch the if_pc (assuming no stall, no branch, and no exception)
   when (io.ctl.fencei && io.ctl.exe_pc_sel === PC_4 &&
         !io.ctl.dec_stall && !io.ctl.full_stall && !io.ctl.pipeline_kill)
   {
      if_pc_next := if_reg_pc
   }
-  
-  // Instruction Memory
-  io.imem.req.valid := if_buffer_in.ready
-  io.imem.req.bits.fcn := M_XRD
-  io.imem.req.bits.typ := MT_WU
-  io.imem.req.bits.addr := if_reg_pc
-  
+
+  val kill = io.ctl.if_kill || io.ctl.pipeline_kill
+
+  //**********************************
+  // Issue side: send the next PC as soon as its slot frees up, without
+  // waiting for any earlier in-flight request's response.
+  val issueSlotFree = !slots(issueId).valid
+
+  io.imem.a.valid        := issueSlotFree
+  io.imem.a.bits.opcode  := ATA8.TilelinkOpcodes.Get
+  io.imem.a.bits.param   := 0.U
+  io.imem.a.bits.size    := bus.dataBusSize.U
+  io.imem.a.bits.source  := issueId
+  io.imem.a.bits.address := if_reg_pc
+  io.imem.a.bits.mask    := "b1111".U(bus.dataBusSize.W)
+  io.imem.a.bits.data    := 0.U
+  io.imem.a.bits.corrupt := 0.U
+
+  // Do not change the PC again if the instruction is killed in previous cycles (when the PC has changed)
+  when (kill || io.imem.a.fire)
+  {
+     if_reg_pc := if_pc_next
+  }
+
+  when (io.imem.a.fire) {
+    slots(issueId).valid    := true.B
+    slots(issueId).resolved := false.B
+    slots(issueId).killed   := kill
+    slots(issueId).pc       := if_reg_pc
+    issueId := ~issueId
+  }
+
+  // Mark every already-in-flight slot killed so its eventual response is
+  // discarded as a bubble instead of reaching decode.
+  when (kill) {
+    for (i <- 0 until 2) {
+      when (slots(i).valid) { slots(i).killed := true.B }
+    }
+  }
+
+  //**********************************
+  // Response side: always accept immediately; file the data into whichever
+  // slot the response's source id names.
+  io.imem.d.ready := true.B
+
+  when (io.imem.d.fire) {
+    slots(io.imem.d.bits.source).data     := io.imem.d.bits.data
+    slots(io.imem.d.bits.source).resolved := true.B
+  }
+
+  //**********************************
+  // Decode-facing consumption: pop the head slot in program order once its
+  // response has resolved.
+  val head = slots(headId)
+
   when (io.ctl.pipeline_kill)
   {
      decReg.valid := false.B
@@ -114,23 +140,19 @@ class Fetch(implicit val p: Parameters, val conf: MccCoreParams) extends Module 
   }
   .elsewhen (!io.ctl.dec_stall && !io.ctl.full_stall)
   {
-     when (io.ctl.if_kill || if_reg_killed)
+     when (head.valid && head.resolved)
      {
-        decReg.valid := false.B
-        decReg.inst := BUBBLE
-     }
-     .elsewhen (if_buffer_out.valid)
-     {
-        decReg.valid := true.B
-        decReg.inst := if_buffer_out.bits.data
+        val squash = head.killed || kill
+        decReg.valid := !squash
+        decReg.inst  := Mux(squash, BUBBLE, head.data)
+        decReg.pc    := head.pc
+        head.valid   := false.B
+        headId       := ~headId
      }
      .otherwise
      {
         decReg.valid := false.B
         decReg.inst := BUBBLE
      }
-  
-     decReg.pc := if_pc_buffer_out.bits
   }
-  
 }

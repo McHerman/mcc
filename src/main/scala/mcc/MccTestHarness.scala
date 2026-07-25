@@ -43,10 +43,21 @@ class MccTestHarness(
   val coreBusConf: ATA8.MemBusConfig =
     ATA8.Configuration(bus = ATA8.BusParams(dataBusSize = 4, addrWidth = 32, sourceWidth = 1))
 
+  // ATAN-side (16-bit local address) bus geometry shared by TLXbar and
+  // SemSystem. Plain val (not implicit) to avoid shadowing coreBusConf as
+  // the ambient ATA8.MemBusConfig implicit; passed explicitly wherever a
+  // full ATA8.Configuration (not just MemBusConfig) is needed, e.g.
+  // SemaphoreProgPort below.
+  val atanBusConf = ATA8.Configuration(
+    bus       = ATA8.BusParams(dataBusSize = 4, addrWidth = 16, sourceWidth = 4),
+    semaphore = ATA8.SemaphoreParams(nSemaphores = 16, queueSize = 2, generationWidth = 2),
+  )
+
   val io = IO(new Bundle {
     val success    = Output(Bool())
     val tohost     = Output(UInt(32.W))
     val cycles     = Output(UInt(64.W))
+    val semProgPort = Flipped(Decoupled(new ATA8.SemaphoreProgPort()(atanBusConf)))
     // Test-only mirror of the core's dmem TileLink bus: chisel3.simulator's
     // peek/poke only sees the top-level DUT's own IO, so internal submodule
     // signals like core.io.dmem aren't peekable directly from a test.
@@ -76,38 +87,39 @@ class MccTestHarness(
   core.io.hartid    := 0.U
   core.io.reset_vector := baseAddr.U
 
-  // ── Instruction memory: async Mem + ROM init ──────────────────────────────
-  // The data-memory path below uses SyncReadMem, which can't serve
-  // same-cycle instruction fetches; keep a separate async Mem for imem.
-  val addrBits = log2Ceil(memBytes)
-  def wordIdx(addr: UInt): UInt = addr(addrBits - 1, 2)
+  // ── Instruction memory: synchronous, TileLink-backed, non-blocking fetch ──
+  // See mcc.ImemTL: a private MemTierScratchpad bank, a normal
+  // TLScratchpadHandler for the boot-time ROM-preload path, and a purpose-
+  // built pipelined Get-only responder (2 outstanding requests, alternating
+  // source id 0/1) for the fetch-critical read path, so Fetch can issue
+  // back-to-back requests instead of stalling on every fetch's latency.
+  val imemMod = Module(new ImemTL(memWords, initData)(coreBusConf))
 
-  val imem = Mem(memWords, Vec(4, UInt(8.W)))
+  val mccImemA = core.io.imem.a
 
-  val initDone: Bool = if (initData.nonEmpty) {
-    val entries  = initData.toSeq.sortBy(_._1)
-    val romAddrs = VecInit(entries.map { case (a, _) => a.U(log2Ceil(memWords).W) })
-    val romData  = VecInit(entries.map { case (_, d) =>
-      VecInit(Seq(
-        ((d >>  0) & 0xFF).U(8.W),
-        ((d >>  8) & 0xFF).U(8.W),
-        ((d >> 16) & 0xFF).U(8.W),
-        ((d >> 24) & 0xFF).U(8.W),
-      ))
-    })
-    val idx  = RegInit(0.U(log2Ceil(entries.size + 1).W))
-    val done = idx === entries.size.U
-    when(!reset.asBool && !done) {
-      imem.write(romAddrs(idx), romData(idx))
-      idx := idx + 1.U
-    }
-    done
-  } else true.B
+  imemMod.io.tl.a.valid        := mccImemA.valid
+  imemMod.io.tl.a.bits.opcode  := mccImemA.bits.opcode
+  imemMod.io.tl.a.bits.param   := mccImemA.bits.param
+  imemMod.io.tl.a.bits.size    := mccImemA.bits.size
+  imemMod.io.tl.a.bits.source  := mccImemA.bits.source
+  imemMod.io.tl.a.bits.address := (mccImemA.bits.address - baseAddr.U)(15, 0)
+  imemMod.io.tl.a.bits.mask    := mccImemA.bits.mask
+  imemMod.io.tl.a.bits.data    := mccImemA.bits.data
+  imemMod.io.tl.a.bits.corrupt := mccImemA.bits.corrupt
+  mccImemA.ready               := imemMod.io.tl.a.ready
 
-  core.io.imem.req.ready := true.B
-  val imem_rdata = imem.read(wordIdx(core.io.imem.req.bits.addr))
-  core.io.imem.resp.valid     := initDone && core.io.imem.req.valid
-  core.io.imem.resp.bits.data := Cat(imem_rdata(3), imem_rdata(2), imem_rdata(1), imem_rdata(0))
+  core.io.imem.d.valid        := imemMod.io.tl.d.valid
+  core.io.imem.d.bits.opcode  := imemMod.io.tl.d.bits.opcode
+  core.io.imem.d.bits.param   := imemMod.io.tl.d.bits.param
+  core.io.imem.d.bits.size    := imemMod.io.tl.d.bits.size
+  core.io.imem.d.bits.source  := imemMod.io.tl.d.bits.source
+  core.io.imem.d.bits.sink    := imemMod.io.tl.d.bits.sink
+  core.io.imem.d.bits.denied  := imemMod.io.tl.d.bits.denied
+  core.io.imem.d.bits.data    := imemMod.io.tl.d.bits.data
+  core.io.imem.d.bits.corrupt := imemMod.io.tl.d.bits.corrupt
+  imemMod.io.tl.d.ready       := core.io.imem.d.ready
+
+  val initDone: Bool = imemMod.io.initDone
 
   // ── Data memory ───────────────────────────────────────────────────────────
   implicit val _coreBusConf: ATA8.MemBusConfig = coreBusConf
@@ -131,28 +143,23 @@ class MccTestHarness(
   dataHandler.io.reserveIn.get(0).bits  := DontCare
 
   // ── Semaphore System ──────────────────────────────────────────────────────
-  // ATAN-side (16-bit local address) bus geometry shared by TLXbar and
-  // SemSystem. Plain val (not implicit) to avoid shadowing coreBusConf as
-  // the ambient ATA8.MemBusConfig implicit.
-  val atanBusConf = ATA8.Configuration(
-    bus       = ATA8.BusParams(dataBusSize = 4, addrWidth = 16, sourceWidth = 4),
-    semaphore = ATA8.SemaphoreParams(nSemaphores = 1, queueSize = 2, generationWidth = 0),
-  )
-
-  // Semaphore 0 mapped at harness offset 0x4000 (mcc address = baseAddr + 0x4000).
-  // Data memory occupies offsets 0x0000 – (memBytes-1); SemSystem starts at 0x4000.
-  //   word 0 (byte offset 0x4000): full register
-  //   word 1 (byte offset 0x4004): empty register
-  val SemSys = Module(new ATA8.SemSystem(1)(atanBusConf))
+  // Semaphores mapped starting at harness offset 0x4000 (mcc address =
+  // baseAddr + 0x4000). Data memory occupies offsets 0x0000 – (memBytes-1);
+  // SemSystem starts at 0x4000. Each semaphore's own address space needs
+  // `genWidth + 1` bits (generation tag + full/empty select), so
+  // SemaphoreBank's internal per-slave-port stride is `2 << genWidth` words;
+  // with 16 semaphores × 2 ports each × 8 words/port (genWidth=2) that's
+  // 256 words = 1024 bytes total.
+  val SemSys = Module(new ATA8.SemaphoreBank(1)(atanBusConf))
 
   // TLXbar routes mcc dmem to the data memory (slave 0) or SemSystem (slave 1) by address.
   //   slave 0: (base=0,      mask=memBytes-1) → offsets 0x0000 – (memBytes-1)
-  //   slave 1: (base=0x4000, mask=0x00FF)     → offsets 0x4000 – 0x40FF
+  //   slave 1: (base=0x4000, mask=0x3FF)      → offsets 0x4000 – 0x43FF
   val hostDemux = Module(new ATA8.TLXbar(ATA8.TLXbarConfig(
     nMasters = 1,
     slaves   = Seq(
       ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0), BigInt(memBytes - 1)))),
-      ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0x4000),  BigInt(0x00FF)))),
+      ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0x4000),  BigInt(0x3FF)))),
     ),
     tl       = atanBusConf.tlBus,
   )))
@@ -174,14 +181,17 @@ class MccTestHarness(
   hostDemux.io.out(0) <> dataHandler.io.tl
 
   // ── TLXbar out(1) → SemSystem ────────────────────────────────────────────
-  // Address transform: strip semBase then convert byte → word index.
-  // addr 0x4000 → bit[7:2] = 0 → full reg; addr 0x4004 → bit[7:2] = 1 → empty reg.
+  // Address transform: strip semBase then convert byte → word index. With
+  // nSemaphores=16 and generationWidth=2, SemaphoreBank needs 256 words
+  // (32 slave-ports × 8 words/port) of word-address space, i.e. bits [9:2]
+  // of the byte address (bits [1:0] within each word select generation tag
+  // + full/empty register, per Semaphore's own address decode).
   SemSys.io.inPorts(0).a.valid        := hostDemux.io.out(1).a.valid
   SemSys.io.inPorts(0).a.bits.opcode  := hostDemux.io.out(1).a.bits.opcode
   SemSys.io.inPorts(0).a.bits.param   := hostDemux.io.out(1).a.bits.param
   SemSys.io.inPorts(0).a.bits.size    := hostDemux.io.out(1).a.bits.size
   SemSys.io.inPorts(0).a.bits.source  := hostDemux.io.out(1).a.bits.source
-  SemSys.io.inPorts(0).a.bits.address := hostDemux.io.out(1).a.bits.address(7, 2)
+  SemSys.io.inPorts(0).a.bits.address := hostDemux.io.out(1).a.bits.address(9, 2)
   SemSys.io.inPorts(0).a.bits.mask    := hostDemux.io.out(1).a.bits.mask
   SemSys.io.inPorts(0).a.bits.data    := hostDemux.io.out(1).a.bits.data
   SemSys.io.inPorts(0).a.bits.corrupt := 0.U
@@ -199,19 +209,23 @@ class MccTestHarness(
   SemSys.io.inPorts(0).d.ready        := hostDemux.io.out(1).d.ready
 
   // ── Semaphore initialisation ──────────────────────────────────────────────
+  SemSys.io.progPort <> io.semProgPort
+
   // Push one SemProgInst on the first cycle after reset: programs semaphore 0
   // with full=64, empty=0. The TriggerSystem fires it in ~4 cycles, well before
   // mcc starts executing (initDone is asserted after ~1026 ROM-load cycles).
-  val semInitDone = RegInit(false.B)
-  SemSys.io.instructionStream.valid                   := !semInitDone
-  SemSys.io.instructionStream.bits                    := DontCare
-  SemSys.io.instructionStream.bits.payload.semAddr    := 0.U
-  SemSys.io.instructionStream.bits.payload.initFull   := 64.U
-  SemSys.io.instructionStream.bits.payload.initEmpty  := 0.U
-  SemSys.io.instructionStream.bits.payload.generation := 0.U
-  SemSys.io.instructionStream.bits.payload.eventMode  := ATA8.SemEventModes.RW
-  SemSys.io.instructionStream.bits.row.depCount       := 0.U
-  when(SemSys.io.instructionStream.fire) { semInitDone := true.B }
+  //val semInitDone = RegInit(false.B)
+
+
+  //SemSys.io.instructionStream.valid                   := !semInitDone
+  //SemSys.io.instructionStream.bits                    := DontCare
+  //SemSys.io.instructionStream.bits.payload.semAddr    := 0.U
+  //SemSys.io.instructionStream.bits.payload.initFull   := 64.U
+  //SemSys.io.instructionStream.bits.payload.initEmpty  := 0.U
+  //SemSys.io.instructionStream.bits.payload.generation := 0.U
+  //SemSys.io.instructionStream.bits.payload.eventMode  := ATA8.SemEventModes.RW
+  //SemSys.io.instructionStream.bits.row.depCount       := 0.U
+  //when(SemSys.io.instructionStream.fire) { semInitDone := true.B }
 
   // ── tohost detection ──────────────────────────────────────────────────────
   val tohostOff = (tohostAddr - baseAddr).toInt
