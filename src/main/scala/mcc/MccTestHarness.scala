@@ -145,21 +145,24 @@ class MccTestHarness(
   // ── Semaphore System ──────────────────────────────────────────────────────
   // Semaphores mapped starting at harness offset 0x4000 (mcc address =
   // baseAddr + 0x4000). Data memory occupies offsets 0x0000 – (memBytes-1);
-  // SemSystem starts at 0x4000. Each semaphore's own address space needs
-  // `genWidth + 1` bits (generation tag + full/empty select), so
-  // SemaphoreBank's internal per-slave-port stride is `2 << genWidth` words;
-  // with 16 semaphores × 2 ports each × 8 words/port (genWidth=2) that's
-  // 256 words = 1024 bytes total.
+  // SemSystem starts at 0x4000. Addressing is byte-indexed (matching the
+  // literal addresses mcc issues): each semaphore-port occupies
+  // `8 << genWidth` bytes (full at +0, empty at +4 for genWidth=0, matching
+  // what the C test programs hardcode), so 16 semaphores × 2 ports × 8
+  // bytes/port = 256 bytes total.
   val SemSys = Module(new ATA8.SemaphoreBank(1)(atanBusConf))
+
+  SemSys.io.eventPort.ready := true.B
 
   // TLXbar routes mcc dmem to the data memory (slave 0) or SemSystem (slave 1) by address.
   //   slave 0: (base=0,      mask=memBytes-1) → offsets 0x0000 – (memBytes-1)
-  //   slave 1: (base=0x4000, mask=0x3FF)      → offsets 0x4000 – 0x43FF
+  //   slave 1: (base=0x4000, mask=semRegionMask) → offsets 0x4000 – 0x40FF
+  val semRegionMask = BigInt(0x00FF)
   val hostDemux = Module(new ATA8.TLXbar(ATA8.TLXbarConfig(
     nMasters = 1,
     slaves   = Seq(
       ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0), BigInt(memBytes - 1)))),
-      ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0x4000),  BigInt(0x3FF)))),
+      ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0x4000),  semRegionMask))),
     ),
     tl       = atanBusConf.tlBus,
   )))
@@ -181,17 +184,18 @@ class MccTestHarness(
   hostDemux.io.out(0) <> dataHandler.io.tl
 
   // ── TLXbar out(1) → SemSystem ────────────────────────────────────────────
-  // Address transform: strip semBase then convert byte → word index. With
-  // nSemaphores=16 and generationWidth=2, SemaphoreBank needs 256 words
-  // (32 slave-ports × 8 words/port) of word-address space, i.e. bits [9:2]
-  // of the byte address (bits [1:0] within each word select generation tag
-  // + full/empty register, per Semaphore's own address decode).
+  // Mask off the semaphore-region base the same way MemSystem.scala's own
+  // hostDemux does for its tiers ("mask the output address so each tier
+  // sees local (zero-based) addresses") - TLXbar itself doesn't rebase, so
+  // callers do it themselves. No shift: SemaphoreBank is byte-indexed, so
+  // the literal address mcc issues (rebased to zero) goes through as-is.
   SemSys.io.inPorts(0).a.valid        := hostDemux.io.out(1).a.valid
   SemSys.io.inPorts(0).a.bits.opcode  := hostDemux.io.out(1).a.bits.opcode
   SemSys.io.inPorts(0).a.bits.param   := hostDemux.io.out(1).a.bits.param
   SemSys.io.inPorts(0).a.bits.size    := hostDemux.io.out(1).a.bits.size
   SemSys.io.inPorts(0).a.bits.source  := hostDemux.io.out(1).a.bits.source
-  SemSys.io.inPorts(0).a.bits.address := hostDemux.io.out(1).a.bits.address(9, 2)
+  //SemSys.io.inPorts(0).a.bits.address := hostDemux.io.out(1).a.bits.address - "h4000".U //Remove region offset  
+  SemSys.io.inPorts(0).a.bits.address := hostDemux.io.out(1).a.bits.address ^ "h4000".U //Remove region offset  
   SemSys.io.inPorts(0).a.bits.mask    := hostDemux.io.out(1).a.bits.mask
   SemSys.io.inPorts(0).a.bits.data    := hostDemux.io.out(1).a.bits.data
   SemSys.io.inPorts(0).a.bits.corrupt := 0.U
@@ -209,23 +213,27 @@ class MccTestHarness(
   SemSys.io.inPorts(0).d.ready        := hostDemux.io.out(1).d.ready
 
   // ── Semaphore initialisation ──────────────────────────────────────────────
-  SemSys.io.progPort <> io.semProgPort
+  // Program semaphore 0 with full=64, empty=0 as soon as the prog port can
+  // accept it, before handing the port over to io.semProgPort (used by tests
+  // that (re)program semaphores themselves, e.g. MccLLVMTest). Restores the
+  // boot-time auto-init the C test programs document/expect
+  // ("Harness initialises full=64, empty=0 before mcc starts executing"),
+  // now driven through SemaphoreBank's progPort instead of the old
+  // (SemSystem-only) instructionStream.
+  val semInitDone = RegInit(false.B)
 
-  // Push one SemProgInst on the first cycle after reset: programs semaphore 0
-  // with full=64, empty=0. The TriggerSystem fires it in ~4 cycles, well before
-  // mcc starts executing (initDone is asserted after ~1026 ROM-load cycles).
-  //val semInitDone = RegInit(false.B)
+  val semInitProg = Wire(new ATA8.SemaphoreProgPort()(atanBusConf))
+  semInitProg.addr       := 0.U
+  semInitProg.initFull   := 64.U
+  semInitProg.initEmpty  := 0.U
+  semInitProg.generation := 0.U
+  semInitProg.eventMode  := ATA8.SemEventModes.RW
 
+  SemSys.io.progPort.valid := Mux(!semInitDone, true.B, io.semProgPort.valid)
+  SemSys.io.progPort.bits  := Mux(!semInitDone, semInitProg, io.semProgPort.bits)
+  io.semProgPort.ready     := Mux(!semInitDone, false.B, SemSys.io.progPort.ready)
 
-  //SemSys.io.instructionStream.valid                   := !semInitDone
-  //SemSys.io.instructionStream.bits                    := DontCare
-  //SemSys.io.instructionStream.bits.payload.semAddr    := 0.U
-  //SemSys.io.instructionStream.bits.payload.initFull   := 64.U
-  //SemSys.io.instructionStream.bits.payload.initEmpty  := 0.U
-  //SemSys.io.instructionStream.bits.payload.generation := 0.U
-  //SemSys.io.instructionStream.bits.payload.eventMode  := ATA8.SemEventModes.RW
-  //SemSys.io.instructionStream.bits.row.depCount       := 0.U
-  //when(SemSys.io.instructionStream.fire) { semInitDone := true.B }
+  when(!semInitDone && SemSys.io.progPort.fire) { semInitDone := true.B }
 
   // ── tohost detection ──────────────────────────────────────────────────────
   val tohostOff = (tohostAddr - baseAddr).toInt

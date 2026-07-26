@@ -104,14 +104,6 @@ trait ScalarOpConstants
    val MEN_1   = true.B
    val MEN_X   = false.B
 
-   // Memory Mask Type Signal
-   val MSK_B   = 0.asUInt(3.W)
-   val MSK_BU  = 1.asUInt(3.W)
-   val MSK_H   = 2.asUInt(3.W)
-   val MSK_HU  = 3.asUInt(3.W)
-   val MSK_W   = 4.asUInt(3.W)
-   val MSK_X   = 4.asUInt(3.W)
-
 }
 
 }

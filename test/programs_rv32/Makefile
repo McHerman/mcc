@@ -9,7 +9,7 @@ CRT0     = crt0.S
 ASM_TESTS    = test_add
 C_TESTS      = test_c_example
 ATOMIC_TESTS = test_zaamo test_sem sem_kernel
-IR_TESTS = penis out
+IR_TESTS = penis out sem_llvm riscv-extrasmall
 
 TESTS = $(ASM_TESTS) $(C_TESTS) $(ATOMIC_TESTS) $(IR_TESTS)
 

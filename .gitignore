@@ -10,7 +10,6 @@ test_run_dir/*
 *.bld
 *.cmd_log
 *.drc
-*.ll
 *.lso
 *.msd
 *.msk

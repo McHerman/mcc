@@ -172,12 +172,12 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.
 
   // mask: byte enables shifted to the correct lanes
   io.dmem.a.bits.mask := MuxLookup(io.fromExe.ctrl_mem_typ, "b1111".U(4.W))(Seq(
-    MSK_B  -> ("b0001".U(4.W) << mem_byte_off)(3, 0),
-    MSK_BU -> ("b0001".U(4.W) << mem_byte_off)(3, 0),
-    MSK_H  -> ("b0011".U(4.W) << mem_byte_off)(3, 0),
-    MSK_HU -> ("b0011".U(4.W) << mem_byte_off)(3, 0),
-    MSK_W  -> "b1111".U(4.W),
-    MSK_X  -> "b1111".U(4.W),
+    MT_B  -> ("b0001".U(4.W) << mem_byte_off)(3, 0),
+    MT_BU -> ("b0001".U(4.W) << mem_byte_off)(3, 0),
+    MT_H  -> ("b0011".U(4.W) << mem_byte_off)(3, 0),
+    MT_HU -> ("b0011".U(4.W) << mem_byte_off)(3, 0),
+    MT_W  -> "b1111".U(4.W),
+    MT_WU -> "b1111".U(4.W),
   ))
 
   // data: pre-shifted to the correct byte lanes
