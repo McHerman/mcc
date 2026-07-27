@@ -36,6 +36,7 @@ case class RvPattern(
   memTyp:   UInt,
   csrCmd:   UInt,
   fenceI:   Boolean,
+  divUnimpl: Boolean = false,
 ) extends DecodePattern {
   override def bitPat = encoding
 }
@@ -96,6 +97,10 @@ object CsrCmdField extends DecodeField[RvPattern, UInt] {
 object FenceIField extends BoolDecodeField[RvPattern] {
   def name = "fencei"
   def genTable(op: RvPattern): BitPat = if (op.fenceI) y else n
+}
+object DivUnimplField extends BoolDecodeField[RvPattern] {
+  def name = "div_unimpl"
+  def genTable(op: RvPattern): BitPat = if (op.divUnimpl) y else n
 }
 
 // ---- IO bundles ----------------------------------------------------------
@@ -171,6 +176,16 @@ class CtlPath(implicit val conf: MccCoreParams, val bus: ATA8.MemBusConfig) exte
     RvPattern(SRA,       BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_SRA,    WB_ALU, true,  false, M_X,   MT_X,  CSR.N, false),
     RvPattern(SRL,       BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_SRL,    WB_ALU, true,  false, M_X,   MT_X,  CSR.N, false),
 
+    // RV32M: multiply implemented; divide/rem are decoded but not implemented (see div_unimpl assertion below)
+    RvPattern(MUL,       BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_MUL,    WB_ALU, true,  false, M_X,   MT_X,  CSR.N, false),
+    RvPattern(MULH,      BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_MULH,   WB_ALU, true,  false, M_X,   MT_X,  CSR.N, false),
+    RvPattern(MULHSU,    BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_MULHSU, WB_ALU, true,  false, M_X,   MT_X,  CSR.N, false),
+    RvPattern(MULHU,     BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_MULHU,  WB_ALU, true,  false, M_X,   MT_X,  CSR.N, false),
+    RvPattern(DIV,       BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_X,      WB_X,   false, false, M_X,   MT_X,  CSR.N, false, divUnimpl = true),
+    RvPattern(DIVU,      BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_X,      WB_X,   false, false, M_X,   MT_X,  CSR.N, false, divUnimpl = true),
+    RvPattern(REM,       BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_X,      WB_X,   false, false, M_X,   MT_X,  CSR.N, false, divUnimpl = true),
+    RvPattern(REMU,      BR_N,  OP1_RS1, OP2_RS2,    true, true,  ALU_X,      WB_X,   false, false, M_X,   MT_X,  CSR.N, false, divUnimpl = true),
+
     RvPattern(JAL,       BR_J,  OP1_RS1, OP2_UJTYPE, false, false, ALU_X,     WB_PC4, true,  false, M_X,   MT_X,  CSR.N, false),
     RvPattern(JALR,      BR_JR, OP1_RS1, OP2_ITYPE,  true, false,  ALU_X,     WB_PC4, true,  false, M_X,   MT_X,  CSR.N, false),
     RvPattern(BEQ,       BR_EQ, OP1_RS1, OP2_SBTYPE, true, true,  ALU_X,      WB_X,   false, false, M_X,   MT_X,  CSR.N, false),
@@ -222,7 +237,7 @@ class CtlPath(implicit val conf: MccCoreParams, val bus: ATA8.MemBusConfig) exte
     ValidField, BrTypeField, Op1SelField, Op2SelField,
     Rs1OenField, Rs2OenField, AluFunField, WbSelField,
     RfWenField, MemEnField, MemFcnField, MemTypField,
-    CsrCmdField, FenceIField,
+    CsrCmdField, FenceIField, DivUnimplField,
   )
 
   private val table  = new DecodeTable(instructions, decodeFields)
@@ -242,6 +257,10 @@ class CtlPath(implicit val conf: MccCoreParams, val bus: ATA8.MemBusConfig) exte
   val cs_msk_sel        = result(MemTypField)
   val cs_csr_cmd        = result(CsrCmdField)
   val cs_fencei: Bool   = result(FenceIField)
+  val cs_div_unimpl: Bool = result(DivUnimplField)
+
+  // RV32M DIV/DIVU/REM/REMU are decoded (not illegal) but not implemented in hardware.
+  assert(!(io.dat.dec_valid && cs_div_unimpl), "unimplemented RV32M division/remainder instruction decoded")
 
   // ---- Branch logic -------------------------------------------------------
 

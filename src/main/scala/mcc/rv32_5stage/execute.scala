@@ -68,6 +68,14 @@ class Execute(implicit val p: Parameters, val conf: MccCoreParams) extends Modul
   val alu_shamt    = exe_alu_op2(4,0).asUInt
   val exe_adder_out = (exe_alu_op1 + exe_alu_op2)(conf.xprlen-1, 0)
 
+  // RV32M multiply: sign-extend operands to 33b based on the op, then a single
+  // signed multiply covers MUL/MULH/MULHSU/MULHU (lhs is signed unless MULHU,
+  // rhs is signed only for MULH).
+  val alu_fun    = io.fromDec.ctrl_alu_fun
+  val mul_lhs    = Cat((alu_fun === ALU_MULH || alu_fun === ALU_MULHSU) && exe_alu_op1(31), exe_alu_op1).asSInt
+  val mul_rhs    = Cat(alu_fun === ALU_MULH && exe_alu_op2(31), exe_alu_op2).asSInt
+  val mul_result = (mul_lhs * mul_rhs).asUInt
+
   val exe_alu_out = MuxCase(io.fromDec.inst.asUInt, Array(
     (io.fromDec.ctrl_alu_fun === ALU_ADD)    -> exe_adder_out,
     (io.fromDec.ctrl_alu_fun === ALU_SUB)    -> (exe_alu_op1 - exe_alu_op2).asUInt,
@@ -80,7 +88,11 @@ class Execute(implicit val p: Parameters, val conf: MccCoreParams) extends Modul
     (io.fromDec.ctrl_alu_fun === ALU_SRA)    -> (exe_alu_op1.asSInt >> alu_shamt).asUInt,
     (io.fromDec.ctrl_alu_fun === ALU_SRL)    -> (exe_alu_op1 >> alu_shamt).asUInt,
     (io.fromDec.ctrl_alu_fun === ALU_COPY_1) -> exe_alu_op1,
-    (io.fromDec.ctrl_alu_fun === ALU_COPY_2) -> exe_alu_op2
+    (io.fromDec.ctrl_alu_fun === ALU_COPY_2) -> exe_alu_op2,
+    (io.fromDec.ctrl_alu_fun === ALU_MUL)    -> mul_result(31, 0),
+    (io.fromDec.ctrl_alu_fun === ALU_MULH)   -> mul_result(63, 32),
+    (io.fromDec.ctrl_alu_fun === ALU_MULHSU) -> mul_result(63, 32),
+    (io.fromDec.ctrl_alu_fun === ALU_MULHU)  -> mul_result(63, 32)
   ))
 
   val brjmp_offset     = io.fromDec.op2_data
