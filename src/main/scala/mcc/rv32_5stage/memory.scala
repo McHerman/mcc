@@ -97,7 +97,12 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.
   // Data misalignment detection
   val misaligned_mask = Wire(UInt(3.W))
   misaligned_mask := ~(7.U(3.W) << (io.fromExe.ctrl_mem_typ - 1.U)(1, 0))
-  io.mem_data_misaligned := (misaligned_mask & mem_addr(2, 0)).orR && io.fromExe.ctrl_mem_val
+
+  // Handle address range excempt from checking
+  val mem_addr_exempt = conf.mmioNoAlignCheckBase.map { base =>
+    mem_addr >= base.U && mem_addr < (base + conf.mmioNoAlignCheckSize).U
+  }.getOrElse(false.B)
+  io.mem_data_misaligned := (misaligned_mask & mem_addr(2, 0)).orR && io.fromExe.ctrl_mem_val && !mem_addr_exempt
   io.mem_store           := io.fromExe.ctrl_mem_fcn === M_XWR
   mem_tval_data_ma       := mem_addr
 
@@ -106,8 +111,9 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.
   // Sub-word extraction for loads: MemTier returns a full 32-bit word, so shift
   // and sign/zero-extend here based on ctrl_mem_typ and the byte offset within
   // the word.  mem_addr is already available from line 95.
+  // Some addresses are excempt 
   val load_d       = io.dmem.d.bits.data
-  val load_shifted = (load_d >> Cat(mem_addr(1, 0), 0.U(3.W)))(31, 0)
+  val load_shifted = Mux(mem_addr_exempt, load_d, (load_d >> Cat(mem_addr(1, 0), 0.U(3.W)))(31, 0))
   val load_data = MuxLookup(io.fromExe.ctrl_mem_typ, load_shifted)(Seq(
     MT_B  -> Cat(Fill(24, load_shifted(7)),  load_shifted(7,  0)),
     MT_BU -> Cat(0.U(24.W),                  load_shifted(7,  0)),
@@ -180,8 +186,12 @@ class Memory(implicit val p: Parameters, val conf: MccCoreParams, val bus: ATA8.
     MT_WU -> "b1111".U(4.W),
   ))
 
-  // data: pre-shifted to the correct byte lanes
-  io.dmem.a.bits.data    := (io.fromExe.rs2_data << mem_byte_shift)(31, 0)
+  // data: pre-shifted to the correct byte lanes. In the alignment-exempt
+  // MMIO window (see mem_addr_exempt above) each address is its own
+  // independent register rather than a lane within a shared word, so the
+  // operand (e.g. an AMO's ADD delta) must go out unshifted.
+  io.dmem.a.bits.data    := Mux(mem_addr_exempt, io.fromExe.rs2_data,
+                               (io.fromExe.rs2_data << mem_byte_shift)(31, 0))
   io.dmem.a.bits.corrupt := 0.U
 
   // D channel: core always accepts responses immediately
