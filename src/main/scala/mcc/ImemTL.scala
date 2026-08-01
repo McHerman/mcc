@@ -75,6 +75,7 @@ class ImemTL(memWords: Int, initData: Map[Int, BigInt])(implicit c: ATA8.MemBusC
 
   val io = IO(new Bundle {
     val tl       = Flipped(new ATA8.TilelinkPort(imemTlBus))
+    val host     = Flipped(new ATA8.TilelinkPort(imemTlBus))
     // Exposed so the harness can gate other things (e.g. dmem access) on
     // the ROM load having finished, same as before.
     val initDone = Output(Bool())
@@ -84,40 +85,62 @@ class ImemTL(memWords: Int, initData: Map[Int, BigInt])(implicit c: ATA8.MemBusC
     ATA8.SPMConfig(bankDepth = memWords, writeports = 1, readports = 1)
   ))
 
-  // ---- Boot-time ROM preload: a normal (single-outstanding) write-only handler ----
   val hostWrite = Module(new ATA8.TLScratchpadHandler(
     ATA8.TLScratchConfig(read = false, write = true, atomic = false, tlConfig = imemTlBus)
   ))
+
   hostWrite.io.wMem.get <> scratch.io.Writeport(0)
+  
+  // Routes host writes to either Imem or initDone register replace with proper debug interface eventually 
+  val hostDemux = Module(new ATA8.TLXbar(ATA8.TLXbarConfig(
+    nMasters = 1,
+    slaves   = Seq(
+      ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0), BigInt(memWords * c.dataBusSize - 1)))),
+      ATA8.TLSlaveConfig(addressSet = Seq((BigInt(0xF000),  BigInt(0x01)))),
+    ),
+    tl       = imemTlBus,
+  )))
 
-  val entries = initData.toSeq.sortBy(_._1)
 
-  val initDone: Bool = if (entries.nonEmpty) {
-    val romAddrs = VecInit(entries.map { case (a, _) => (a * 4).U(imemTlBus.addrWidth.W) })
-    val romData  = VecInit(entries.map { case (_, d) => d.U(32.W) })
-    val loadIdx  = RegInit(0.U(log2Ceil(entries.size + 1).W))
-    val done     = loadIdx === entries.size.U
+  //io.host <> scratch.io.Writeport(0)
 
-    hostWrite.io.tl.a.valid        := !reset.asBool && !done
-    hostWrite.io.tl.a.bits.opcode  := ATA8.TilelinkOpcodes.PutFullData
-    hostWrite.io.tl.a.bits.param   := 0.U
-    hostWrite.io.tl.a.bits.size    := imemTlBus.dataBusSize.U
-    hostWrite.io.tl.a.bits.source  := 0.U
-    hostWrite.io.tl.a.bits.address := romAddrs(loadIdx)
-    hostWrite.io.tl.a.bits.mask    := "b1111".U
-    hostWrite.io.tl.a.bits.data    := romData(loadIdx)
-    hostWrite.io.tl.a.bits.corrupt := 0.U
-    hostWrite.io.tl.d.ready        := true.B
+  io.host <> hostDemux.io.in(0)
+  hostDemux.io.out(0) <> hostWrite.io.tl
 
-    when(!done && hostWrite.io.tl.d.fire) { loadIdx := loadIdx + 1.U }
+  val initDone = RegInit(false.B)
+  val delay = RegInit(false.B)
 
-    done
-  } else {
-    hostWrite.io.tl.a.valid := false.B
-    hostWrite.io.tl.a.bits  := DontCare
-    hostWrite.io.tl.d.ready := true.B
-    true.B
+  val pendingId = Reg(UInt(imemTlBus.sourceWidth.W))
+
+  hostDemux.io.out(1).a.ready := true.B
+
+  hostDemux.io.out(1).d.valid := false.B
+  hostDemux.io.out(1).d.bits := DontCare 
+
+
+  when(hostDemux.io.out(1).a.valid) {
+    initDone := hostDemux.io.out(1).a.bits.data(0)
+    pendingId := hostDemux.io.out(1).a.bits.source
+    delay := true.B
   }
+
+  when(delay) {
+    hostDemux.io.out(1).d.valid := true.B
+    hostDemux.io.out(1).d.valid := true.B
+
+    hostDemux.io.out(1).d.valid        := true.B
+    hostDemux.io.out(1).d.bits.opcode  := ATA8.TilelinkOpcodes.AccessAckData
+    hostDemux.io.out(1).d.bits.param   := 0.U
+    hostDemux.io.out(1).d.bits.size    := 4.U
+    hostDemux.io.out(1).d.bits.source  := pendingId
+    hostDemux.io.out(1).d.bits.sink    := 0.U
+    hostDemux.io.out(1).d.bits.denied  := 0.U
+    hostDemux.io.out(1).d.bits.data    := 0.U 
+    hostDemux.io.out(1).d.bits.corrupt := 0.U
+    
+  }
+
+
 
   // ---- Fetch-critical read path: pipelined, 2 outstanding requests ----
   val readHandler = Module(new TLPipelinedReadHandler(imemTlBus))
